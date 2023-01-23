@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  sam-join-data-step-function
+
+  Sample SAM Template for sam-join-data-step-function
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+    MemorySize: 128
+
+
+Parameters:
+  SubnetId01:
+    Type: String
+    Description: Subnet Id 01 for containers
+  SubnetId02:
+    Type: String
+    Description: Subnet Id 02 for containers
+  SecurityGroupId:
+    Type: String
+    Description: Security Group Id for containers
+  ScriptLocationS3Uri:
+    Type: String
+    Description: Security Group Id for containers
+
+
+Resources:
+  TriggerFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: functions/trigger/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref ValidationStateMachine
+      Policies:
+        - Version: '2012-10-17' 
+          Statement:
+            - Effect: Allow
+              Action:
+                - states:StartExecution
+              Resource: "*"
+      
+      
+  MyJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: "*"
+                Resource: "*"
+ 
+  MyJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Ref ScriptLocationS3Uri
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+      GlueVersion: 3.0
+      Name: join-data-job
+      Role: !Ref MyJobRole
+      
+      
+      
+      
+  # CLOUDWATCH LOG GROUP
+
+  CloudWatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref AWS::StackName
+      RetentionInDays: 365
+
+  # CLUSTER FOR CONTAINERS
+
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-cluster'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+
+  TaskExecutionRole:
+      Type: 'AWS::IAM::Role'
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - ecs-tasks.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Path: /
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # CONTAINER FOR LOAD FILE
+          
+  MyRepository: 
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: !Sub '${AWS::StackName}-load-files-repository'
+      ImageScanningConfiguration: 
+        ScanOnPush: "true"
+        
+  TaskRole:
+      Type: 'AWS::IAM::Role'
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - ecs-tasks.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Path: /
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        Policies: 
+          - PolicyName: AccessS3
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:PutObject
+                    - s3:GetObject
+                    - s3:GetObjectACL
+                  Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-load-files/*'
+          - PolicyName: AccessDynamoDB
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:BatchWriteItem
+                    - dynamodb:CreateTable
+                    - dynamodb:DescribeTable
+                    - dynamodb:UpdateItem
+                    - dynamodb:GetItem
+                  Resource: '*'
+                  
+  LoadFileTaskDefinition: 
+    Type: AWS::ECS::TaskDefinition
+    Properties: 
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      NetworkMode: 'awsvpc'
+      Cpu: 4096
+      Memory: 16384
+      RequiresCompatibilities:
+        - "FARGATE"
+      ContainerDefinitions: 
+        - 
+          Name: "container"
+          Image: !GetAtt MyRepository.RepositoryUri
+          Cpu: 4096
+          Memory: 16384
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Sub '${AWS::StackName}-load-files'
+
+# Step function
+
+  StepFunctionLogs:
+    Type: AWS::Logs::LogGroup
+
+  ValidationStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: STANDARD
+      DefinitionUri: statemachine/validator.asl.json
+      DefinitionSubstitutions:
+        SubnetId01: !Ref SubnetId01
+        SubnetId02: !Ref SubnetId02
+        SecurityGroupId: !Ref SecurityGroupId
+        ClusterArn: !GetAtt ECSCluster.Arn
+        TaskDefinitionArn: !Ref LoadFileTaskDefinition
+        TaskRoleArn: !GetAtt TaskRole.Arn
+        JobName: !Ref MyJob
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StepFunctionLogs.Arn
+        IncludeExecutionData: true
+        Level: ALL
+      Policies:
+        - CloudWatchLogsFullAccess
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ecs:RunTask
+                - iam:PassRole
+                - ecs:StopTask
+                - ecs:DescribeTasks
+                - events:PutTargets
+                - events:PutRule
+                - events:DescribeRule
+              Resource: "*"
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - glue:StartJobRun
+                - glue:GetJobRun
+                - glue:BatchStopJobRun
+                - glue:GetJobRuns
+              Resource: "*"
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - xray:PutTraceSegments
+                - xray:PutTelemetryRecords
+                - xray:GetSamplingRules
+                - xray:GetSamplingTargets
+              Resource: "*"
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  TriggerFunction:
+    Description: "Lambda Function ARN"
+    Value: !GetAtt TriggerFunction.Arn

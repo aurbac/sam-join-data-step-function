@@ -1,0 +1,44 @@
+{
+  "Comment": "A description of my state machine",
+  "StartAt": "Glue StartJobRun",
+  "States": {
+    "Glue StartJobRun": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${JobName}",
+        "Arguments": {
+          "--source1.$": "$.source1",
+          "--source2.$": "$.source2",
+          "--jobid.$": "$.jobid"
+        }
+      },
+      "Next": "ECS RunTask"
+    },
+    "ECS RunTask": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "LaunchType": "FARGATE",
+        "Cluster": "${ClusterArn}",
+        "TaskDefinition": "${TaskDefinitionArn}",
+        "Overrides": {
+          "TaskRoleArn": "${TaskRoleArn}"
+        },
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": [
+              "${SubnetId01}",
+              "${SubnetId02}"
+            ],
+            "SecurityGroups": [
+              "${SecurityGroupId}"
+            ],
+            "AssignPublicIp": "ENABLED"
+          }
+        }
+      },
+      "End": true
+    }
+  }
+}
